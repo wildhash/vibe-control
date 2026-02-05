@@ -1,0 +1,48 @@
+# VibeControl - Cursor Rules
+
+## Project: Generative UI IDE for Tambo Hackathon
+
+### Quick Context
+- **Hackathon:** WeMakeDevs "The UI Strikes Back"
+- **Tech:** Next.js 14 + Gemini 2.0 Flash + Tambo SDK
+- **Goal:** AI-powered IDE where UI components are generated based on AI tool calls
+
+### Architecture Pattern
+```
+User Message → /api/agent → Gemini (with tools) → Tool Call → Component Render
+```
+
+### Key Files to Know
+- `/app/api/agent/route.ts` - Main AI orchestration
+- `/lib/mcp-tools.ts` - Filesystem/terminal operations  
+- `/components/vibe/*` - Generative UI components
+- `/app/page.tsx` - Chat interface
+
+### Component Types
+When AI calls a tool, return a component:
+- `list_workspace_files` → `workspace_tree`
+- `read_file` → `code_panel`
+- `execute_command` → `approval_card`
+- `get_git_status/diff` → text response
+
+### Security Pattern (Approval Tokens)
+1. AI wants to run command → creates `request_id`
+2. UI shows ApprovalCard → user clicks Approve
+3. `/api/approve` called → returns one-time `approval_token`
+4. `/api/execute` called with token → validates and runs
+
+### When Editing Components
+- Export both component AND Zod schema
+- Use "use client" for interactive components
+- Keep props minimal (Tambo recommendation)
+- Match component type in page.tsx switch statement
+
+### Common Issues
+- Missing GEMINI_API_KEY → add to .env.local
+- Tool not working → check mcp-tools.ts
+- Component not showing → check page.tsx renderComponent
+
+### Demo Flow to Preserve
+1. "Show me the project" → WorkspaceTree
+2. "Read package.json" → CodePanel
+3. "Run npm test" → ApprovalCard → Terminal output
