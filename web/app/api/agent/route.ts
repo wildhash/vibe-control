@@ -37,7 +37,7 @@ const tools: FunctionDeclaration[] = [
       properties: {
         path: { 
           type: SchemaType.STRING,
-          description: `Directory path to list. Default is the current workspace: ${DEFAULT_WORKSPACE}` 
+          description: "Directory path to list. Default is the current workspace root."
         },
         depth: { type: SchemaType.NUMBER, description: "Depth to traverse (default: 2)" },
       },
