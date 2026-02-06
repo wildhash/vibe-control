@@ -148,7 +148,7 @@ export default function Home() {
           />
         ) : (
           <div className="text-sm text-zinc-500 p-4">
-            Ask "Show me the project structure" to populate the workspace view.
+            Ask &quot;Show me the project structure&quot; to populate the workspace view.
           </div>
         );
       case "code":
