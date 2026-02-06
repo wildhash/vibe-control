@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { basename, resolve, isAbsolute, relative, sep } from "path";
+import { basename, resolve, isAbsolute, normalize, relative } from "path";
 import { realpathSync } from "fs";
 import {
   GoogleGenerativeAI,
@@ -44,7 +44,7 @@ function detectWorkspaceRoot(): string {
 
 // Default workspace path - the vibe-control project itself
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
-const WORKSPACE_ROOT_REAL = realpathSync(resolve(DEFAULT_WORKSPACE));
+const WORKSPACE_ROOT_REAL = normalize(realpathSync(resolve(DEFAULT_WORKSPACE)));
 if (process.env.DEBUG_AGENT === "1") {
   console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
 }
@@ -167,21 +167,43 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
 
 // Authoritative guard for ensuring an absolute path stays under the workspace root.
 function isOutsideWorkspace(absolutePath: string): boolean {
-  const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
+  const rel = relative(WORKSPACE_ROOT_REAL, normalize(absolutePath));
   if (!rel) return false;
-  return isAbsolute(rel) || rel === ".." || rel.startsWith(".." + sep);
+  // On Windows, `relative()` can return an absolute path when drives differ.
+  if (isAbsolute(rel)) return true;
+
+  const normalized = rel.replace(/\\/g, "/");
+  return normalized === ".." || normalized.startsWith("../");
 }
 
 function toWorkspaceRelativePath(absolutePath: string): string {
-  const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
-  // Use "." for the root so consumers can safely join paths as `./file`.
-  return rel || ".";
+  return relative(WORKSPACE_ROOT_REAL, absolutePath) || ".";
 }
 
-function resolveWorkspacePath(maybePath: unknown): string {
-  if (typeof maybePath !== "string" || !maybePath.trim()) return WORKSPACE_ROOT_REAL;
+function resolveWorkspacePath(
+  maybePath: unknown,
+  { allowDefaultRoot = true }: { allowDefaultRoot?: boolean } = {}
+): string {
+  if (typeof maybePath !== "string" || !maybePath.trim()) {
+    if (!allowDefaultRoot) {
+      throw new Error("A non-empty workspace-relative path is required.");
+    }
+    return WORKSPACE_ROOT_REAL;
+  }
 
   const inputPath = maybePath.trim();
+  if (inputPath === "." || inputPath === "./" || inputPath === ".\\") {
+    if (!allowDefaultRoot) {
+      throw new Error("A non-empty workspace-relative path is required.");
+    }
+    return WORKSPACE_ROOT_REAL;
+  }
+
+  const segments = inputPath.split(/[/\\]+/);
+  if (segments.includes("..")) {
+    throw new Error("Parent directory references (..) are not allowed in workspace-relative paths.");
+  }
+
   if (isAbsolute(inputPath)) {
     throw new Error(
       "Absolute paths are not allowed. Use a path relative to the workspace root instead."
@@ -237,10 +259,11 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
       }
 
       case "read_file": {
-        const absolutePath = resolveWorkspacePath(args.path);
+        const absolutePath = resolveWorkspacePath(args.path, { allowDefaultRoot: false });
         const modelPath = toWorkspaceRelativePath(absolutePath);
         const content = await workspaceRead(absolutePath);
-        const ext = modelPath.split(".").pop() || "text";
+        const displayPath = modelPath;
+        const ext = displayPath.split(".").pop() || "text";
         const langMap: Record<string, string> = {
           ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
           py: "python", json: "json", md: "markdown", css: "css", html: "html",
@@ -263,7 +286,7 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
             props: {
               code: content,
               language: langMap[ext] || "plaintext",
-              filename: modelPath.split(/[/\\]/).pop() || modelPath,
+              filename: displayPath.split(/[/\\]/).pop() || displayPath,
               truncated: wasTruncated,
               omittedChars,
             },
