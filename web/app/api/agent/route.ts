@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { basename, resolve, isAbsolute, sep } from "path";
+import { basename, resolve, isAbsolute, relative, sep } from "path";
 import { realpathSync } from "fs";
 import {
   GoogleGenerativeAI,
@@ -45,9 +45,6 @@ function detectWorkspaceRoot(): string {
 // Default workspace path - the vibe-control project itself
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
 const WORKSPACE_ROOT_REAL = realpathSync(resolve(DEFAULT_WORKSPACE));
-const WORKSPACE_ROOT_WITH_SEP = WORKSPACE_ROOT_REAL.endsWith(sep)
-  ? WORKSPACE_ROOT_REAL
-  : WORKSPACE_ROOT_REAL + sep;
 if (process.env.DEBUG_AGENT === "1") {
   console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
 }
@@ -167,24 +164,44 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
   }
 }
 
+function isOutsideWorkspace(path: string): boolean {
+  const rel = relative(WORKSPACE_ROOT_REAL, path);
+  return rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel);
+}
+
 function resolveWorkspacePath(maybePath: unknown): string {
   if (typeof maybePath !== "string" || !maybePath.trim()) return WORKSPACE_ROOT_REAL;
 
-  const candidate = resolve(isAbsolute(maybePath) ? maybePath : resolve(WORKSPACE_ROOT_REAL, maybePath));
+  const inputPath = maybePath.trim();
+  const candidate = resolve(isAbsolute(inputPath) ? inputPath : resolve(WORKSPACE_ROOT_REAL, inputPath));
+
+  // Policy: absolute paths are allowed only when they already sit under the workspace root.
+  // This keeps tool traces portable and avoids accessing the workspace via host-specific symlinks.
+  if (isAbsolute(inputPath) && isOutsideWorkspace(candidate)) {
+    throw new Error(
+      `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`
+    );
+  }
+
+  if (isOutsideWorkspace(candidate)) {
+    throw new Error(
+      `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`
+    );
+  }
 
   let resolvedPath: string;
   try {
     resolvedPath = realpathSync(candidate);
   } catch (err: any) {
     if (err?.code === "ENOENT") {
-      throw new Error(`Path "${maybePath}" does not exist inside the workspace.`);
+      throw new Error(`Path "${inputPath}" does not exist inside the workspace.`);
     }
     throw err;
   }
 
-  if (resolvedPath !== WORKSPACE_ROOT_REAL && !resolvedPath.startsWith(WORKSPACE_ROOT_WITH_SEP)) {
+  if (isOutsideWorkspace(resolvedPath)) {
     throw new Error(
-      `Path "${maybePath}" is outside the workspace root. Use a path under the project directory instead.`
+      `Path "${inputPath}" resolves outside the workspace root (possible symlink escape). Use a path under the project directory instead.`
     );
   }
 

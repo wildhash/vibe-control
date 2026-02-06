@@ -86,11 +86,9 @@ export function ApprovalCard({
       const message = String(err?.message || "Execution failed");
       setStatus("error");
       setError(message);
-      setOutput((prev) => {
-        const next = [...prev, `❌ Error: ${message}`];
-        onExecutionComplete?.(next.join("\n"), "error");
-        return next;
-      });
+      const next = [...output, `❌ Error: ${message}`];
+      setOutput(next);
+      onExecutionComplete?.(next.join("\n"), "error");
     }
   };
 
