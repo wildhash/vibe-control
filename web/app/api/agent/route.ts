@@ -9,10 +9,13 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { basename, resolve, isAbsolute } from "path";
 import {
   GoogleGenerativeAI,
   SchemaType,
   type FunctionDeclaration,
+  type FunctionCall,
+  type Part,
 } from "@google/generative-ai";
 import {
   workspaceList,
@@ -24,8 +27,13 @@ import {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
+function detectWorkspaceRoot(): string {
+  const cwd = process.cwd();
+  return basename(cwd) === "web" ? resolve(cwd, "..") : cwd;
+}
+
 // Default workspace path - the vibe-control project itself
-const DEFAULT_WORKSPACE = process.cwd();
+const DEFAULT_WORKSPACE = detectWorkspaceRoot();
 
 // Tool definitions for Gemini
 const tools: FunctionDeclaration[] = [
@@ -115,16 +123,46 @@ interface UIComponent {
   props: Record<string, any>;
 }
 
-async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; component?: UIComponent }> {
+const MAX_TOOL_STEPS = 6;
+const MODEL_TEXT_SEPARATOR = "\n\n";
+const MAX_FILE_CHARS_FOR_MODEL = 20_000;
+
+function toFunctionResponsePayload(value: unknown): object {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value as object;
+  return { result: value };
+}
+
+function safeResponseText(response: { text: () => string }): string {
+  try {
+    return response.text();
+  } catch {
+    return "";
+  }
+}
+
+function safeFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] {
+  try {
+    return response.functionCalls() ?? [];
+  } catch {
+    return [];
+  }
+}
+
+function resolveWorkspacePath(maybePath: unknown): string {
+  if (typeof maybePath !== "string" || !maybePath.trim()) return DEFAULT_WORKSPACE;
+  return isAbsolute(maybePath) ? maybePath : resolve(DEFAULT_WORKSPACE, maybePath);
+}
+
+async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: object; component?: UIComponent }> {
   const { name, args } = toolCall;
 
   try {
     switch (name) {
       case "list_workspace_files": {
-        const path = args.path || DEFAULT_WORKSPACE;
+        const path = resolveWorkspacePath(args.path);
         const tree = await workspaceList(path, args.depth || 2);
         return {
-          result: tree,
+          modelResponse: { path, tree },
           component: {
             type: "workspace_tree",
             props: { tree, rootPath: path },
@@ -133,20 +171,30 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; compon
       }
 
       case "read_file": {
-        const content = await workspaceRead(args.path);
-        const ext = args.path.split(".").pop() || "text";
+        const path = resolveWorkspacePath(args.path);
+        const content = await workspaceRead(path);
+        const ext = path.split(".").pop() || "text";
         const langMap: Record<string, string> = {
           ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
           py: "python", json: "json", md: "markdown", css: "css", html: "html",
         };
+
+        const wasTruncated = content.length > MAX_FILE_CHARS_FOR_MODEL;
+        const modelContent = wasTruncated ? content.slice(0, MAX_FILE_CHARS_FOR_MODEL) : content;
+
         return {
-          result: content,
+          modelResponse: {
+            path,
+            content: modelContent,
+            truncated: wasTruncated,
+            totalChars: content.length,
+          },
           component: {
             type: "code_panel",
             props: {
               code: content,
               language: langMap[ext] || "plaintext",
-              filename: args.path.split(/[/\\]/).pop() || args.path,
+              filename: path.split(/[/\\]/).pop() || path,
             },
           },
         };
@@ -155,7 +203,12 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; compon
       case "execute_command": {
         const result = await requestApproval("terminal_run", args.reason, args.command);
         return {
-          result,
+          modelResponse: {
+            ...result,
+            action: "terminal_run",
+            reason: args.reason,
+            command: args.command,
+          },
           component: {
             type: "approval_card",
             props: {
@@ -169,22 +222,22 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; compon
       }
 
       case "get_git_status": {
-        const cwd = args.cwd || DEFAULT_WORKSPACE;
+        const cwd = resolveWorkspacePath(args.cwd);
         const result = await gitStatus(cwd);
-        return { result };
+        return { modelResponse: { cwd, status: result } };
       }
 
       case "get_git_diff": {
-        const cwd = args.cwd || DEFAULT_WORKSPACE;
+        const cwd = resolveWorkspacePath(args.cwd);
         const result = await gitDiff(cwd);
-        return { result };
+        return { modelResponse: { cwd, diff: result } };
       }
 
       default:
-        return { result: { error: `Unknown tool: ${name}` } };
+        return { modelResponse: { error: `Unknown tool: ${name}` } };
     }
   } catch (error: any) {
-    return { result: { error: error.message } };
+    return { modelResponse: { error: error.message } };
   }
 }
 
@@ -216,54 +269,71 @@ export async function POST(request: NextRequest) {
     });
 
     // Send user message
-    const result = await chat.sendMessage(message);
-    const response = result.response;
-
-    // Check for function calls
-    const candidates = response.candidates || [];
-    const parts = candidates[0]?.content?.parts || [];
-    
     const components: UIComponent[] = [];
-    let textContent = "";
+    const textParts: string[] = [];
+    let fallbackText = "";
 
-    for (const part of parts) {
-      if (part.text) {
-        textContent += part.text;
-      }
-      
-      if (part.functionCall) {
+    let sawExecuteCommand = false;
+    let result = await chat.sendMessage(message);
+
+    for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+      const response = result.response;
+      const responseText = safeResponseText(response);
+      if (responseText) textParts.push(responseText);
+
+      const calls = safeFunctionCalls(response);
+      if (calls.length === 0) break;
+
+      const functionResponseParts: Part[] = [];
+
+      for (const call of calls) {
         const toolCall: ToolCall = {
-          name: part.functionCall.name,
-          args: part.functionCall.args as Record<string, any>,
+          name: call.name,
+          args: call.args as Record<string, any>,
         };
-        
-        const { result, component } = await handleToolCall(toolCall);
-        
-        if (component) {
-          components.push(component);
-        }
-        
-        // Add text about what was done if no text yet
-        if (!textContent) {
+
+        if (!fallbackText) {
           switch (toolCall.name) {
             case "list_workspace_files":
-              textContent = "Here's the project structure:";
+              fallbackText = "Here's the project structure:";
               break;
             case "read_file":
-              textContent = `Here's the content of ${toolCall.args.path}:`;
+              fallbackText = "Here's the file:";
               break;
             case "execute_command":
-              textContent = "This command requires your approval:";
+              fallbackText = "This command requires your approval:";
               break;
             default:
-              textContent = "Here's what I found:";
+              fallbackText = "Here's what I found:";
           }
         }
+
+        const { modelResponse, component } = await handleToolCall(toolCall);
+        if (component) components.push(component);
+
+        functionResponseParts.push({
+          functionResponse: {
+            name: toolCall.name,
+            response: toFunctionResponsePayload(modelResponse),
+          },
+        });
+
+        if (toolCall.name === "execute_command") sawExecuteCommand = true;
+      }
+
+      result = await chat.sendMessage(functionResponseParts);
+
+      if (sawExecuteCommand) {
+        const finalText = safeResponseText(result.response);
+        if (finalText) textParts.push(finalText);
+        break;
       }
     }
 
+    const textContent = textParts.filter(Boolean).join(MODEL_TEXT_SEPARATOR).trim();
+
     return NextResponse.json({
-      content: textContent || "I'm ready to help you explore your codebase!",
+      content: textContent || fallbackText || "I'm ready to help you explore your codebase!",
       components,
     });
   } catch (error: any) {
