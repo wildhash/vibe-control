@@ -59,7 +59,7 @@ const tools: FunctionDeclaration[] = [
       properties: {
         path: { 
           type: SchemaType.STRING,
-          description: "Directory path to list. Default is the current workspace root."
+          description: "Workspace-relative directory path to list (e.g. `web/app`). Default is the workspace root."
         },
         depth: { type: SchemaType.NUMBER, description: "Depth to traverse (default: 2)" },
       },
@@ -72,7 +72,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        path: { type: SchemaType.STRING, description: "Full file path to read" },
+        path: { type: SchemaType.STRING, description: "Workspace-relative file path to read (e.g. `web/app/page.tsx`)" },
       },
       required: ["path"],
     },
@@ -85,7 +85,7 @@ const tools: FunctionDeclaration[] = [
       properties: {
         command: { type: SchemaType.STRING, description: "Command to execute" },
         reason: { type: SchemaType.STRING, description: "Why this command is needed" },
-        cwd: { type: SchemaType.STRING, description: "Working directory (optional)" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative working directory (optional)" },
       },
       required: ["command", "reason"],
     },
@@ -96,7 +96,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: SchemaType.STRING, description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative path (optional)" },
       },
       required: [],
     },
@@ -107,7 +107,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: SchemaType.STRING, description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative path (optional)" },
       },
       required: [],
     },
@@ -118,13 +118,14 @@ const SYSTEM_PROMPT = `You are VibeControl, an AI-powered IDE assistant. You hel
 
 IMPORTANT RULES:
 1. When users ask about project structure, files, or folders - call list_workspace_files
-2. When users ask to see/read a file - call read_file with the full path
+2. When users ask to see/read a file - call read_file with a workspace-relative path
 3. When users ask to run commands (tests, builds, etc) - call execute_command (requires approval)
 4. When users ask about git status or changes - call get_git_status or get_git_diff
 
-The current workspace is: ${DEFAULT_WORKSPACE}
+The current workspace root is the project directory (all tool paths are relative to it).
 
 When listing files, if no path is specified, use the workspace root.
+Never use absolute paths when calling tools.
 Always be helpful and explain what you find.`;
 
 interface ToolCall {
@@ -164,20 +165,31 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
   }
 }
 
-function isOutsideWorkspace(path: string): boolean {
-  const rel = relative(WORKSPACE_ROOT_REAL, path);
+function isOutsideWorkspace(absolutePath: string): boolean {
+  const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
   if (!rel) return false;
-  return isAbsolute(rel) || rel.split(sep)[0] === "..";
+  return isAbsolute(rel) || rel === ".." || rel.startsWith(".." + sep);
+}
+
+function toWorkspaceRelativePath(absolutePath: string): string {
+  const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
+  return rel || ".";
 }
 
 function resolveWorkspacePath(maybePath: unknown): string {
   if (typeof maybePath !== "string" || !maybePath.trim()) return WORKSPACE_ROOT_REAL;
 
   const inputPath = maybePath.trim();
-  const candidate = resolve(isAbsolute(inputPath) ? inputPath : resolve(WORKSPACE_ROOT_REAL, inputPath));
+  if (isAbsolute(inputPath)) {
+    throw new Error(
+      `Absolute path "${inputPath}" is not allowed. Use a path relative to the workspace root instead.`
+    );
+  }
 
-  // Policy: absolute paths are allowed only when they already sit under the workspace root.
-  // This keeps tool traces portable and avoids accessing the workspace via host-specific symlinks.
+  const candidate = resolve(WORKSPACE_ROOT_REAL, inputPath);
+
+  // Policy: tools must use workspace-relative paths.
+  // This keeps tool traces portable and avoids accessing the workspace via host-specific absolute paths.
   // The post-`realpathSync` check below is the authoritative guard for symlink escapes.
   if (isOutsideWorkspace(candidate)) {
     throw new Error(
@@ -210,21 +222,23 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
   try {
     switch (name) {
       case "list_workspace_files": {
-        const path = resolveWorkspacePath(args.path);
-        const tree = await workspaceList(path, args.depth || 2);
+        const absolutePath = resolveWorkspacePath(args.path);
+        const modelPath = toWorkspaceRelativePath(absolutePath);
+        const tree = await workspaceList(absolutePath, args.depth || 2);
         return {
-          modelResponse: { path, tree },
+          modelResponse: { path: modelPath, tree },
           component: {
             type: "workspace_tree",
-            props: { tree, rootPath: path },
+            props: { tree, rootPath: modelPath },
           },
         };
       }
 
       case "read_file": {
-        const path = resolveWorkspacePath(args.path);
-        const content = await workspaceRead(path);
-        const ext = path.split(".").pop() || "text";
+        const absolutePath = resolveWorkspacePath(args.path);
+        const modelPath = toWorkspaceRelativePath(absolutePath);
+        const content = await workspaceRead(absolutePath);
+        const ext = modelPath.split(".").pop() || "text";
         const langMap: Record<string, string> = {
           ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
           py: "python", json: "json", md: "markdown", css: "css", html: "html",
@@ -236,7 +250,7 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
 
         return {
           modelResponse: {
-            path,
+            path: modelPath,
             content: modelContent,
             truncated: wasTruncated,
             totalChars: content.length,
@@ -247,7 +261,7 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
             props: {
               code: content,
               language: langMap[ext] || "plaintext",
-              filename: path.split(/[/\\]/).pop() || path,
+              filename: modelPath.split(/[/\\]/).pop() || modelPath,
               truncated: wasTruncated,
               omittedChars,
             },
@@ -277,14 +291,16 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
       }
 
       case "get_git_status": {
-        const cwd = resolveWorkspacePath(args.cwd);
-        const result = await gitStatus(cwd);
+        const absoluteCwd = resolveWorkspacePath(args.cwd);
+        const cwd = toWorkspaceRelativePath(absoluteCwd);
+        const result = await gitStatus(absoluteCwd);
         return { modelResponse: { cwd, status: result } };
       }
 
       case "get_git_diff": {
-        const cwd = resolveWorkspacePath(args.cwd);
-        const result = await gitDiff(cwd);
+        const absoluteCwd = resolveWorkspacePath(args.cwd);
+        const cwd = toWorkspaceRelativePath(absoluteCwd);
+        const result = await gitDiff(absoluteCwd);
         return { modelResponse: { cwd, diff: result } };
       }
 
