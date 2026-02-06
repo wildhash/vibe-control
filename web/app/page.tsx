@@ -102,7 +102,7 @@ export default function Home() {
       const hudUpdates: HudState = {};
       const chatComponents: UIComponent[] = [];
       let nextActiveTab: HudTab | null = null;
-      const hudTabPriority: Record<HudTab, number> = {
+      const hudTabOrder: Record<HudTab, number> = {
         workspace: 1,
         code: 2,
         terminal: 3,
@@ -114,7 +114,7 @@ export default function Home() {
           nextActiveTab = tab;
           return;
         }
-        if (hudTabPriority[tab] > hudTabPriority[nextActiveTab]) {
+        if (hudTabOrder[tab] > hudTabOrder[nextActiveTab]) {
           nextActiveTab = tab;
         }
       };
@@ -193,7 +193,7 @@ export default function Home() {
         return hudState.workspace ? (
           <WorkspaceTree
             {...hudState.workspace.props}
-            onFileSelect={(path) => sendMessage(`Read the file ${path}`)}
+            onFileSelect={(path) => void sendMessage(`Read the file ${path}`)}
           />
         ) : (
           <div className="text-sm text-zinc-500 p-4">
@@ -339,7 +339,7 @@ export default function Home() {
                     ].map((suggestion) => (
                       <button
                         key={suggestion}
-                        onClick={() => sendMessage(suggestion)}
+                        onClick={() => void sendMessage(suggestion)}
                         className="px-3 py-1.5 text-sm bg-zinc-800 hover:bg-zinc-700 rounded-full transition-colors"
                       >
                         {suggestion}

@@ -74,18 +74,23 @@ export function ApprovalCard({
         const outputText = typeof execData.output === "string" 
           ? execData.output 
           : execData.output?.content?.[0]?.text || JSON.stringify(execData.output);
-        
-        setOutput(["$ " + command, ...outputText.split("\n")]);
+
+        const lines = ["$ " + command, ...outputText.split("\n")];
+        setOutput(lines);
         setStatus("success");
-        onExecutionComplete?.(outputText, "success");
+        onExecutionComplete?.(lines.join("\n"), "success");
       } else {
         throw new Error(execData.error || "Execution failed");
       }
     } catch (err: any) {
+      const message = String(err?.message || "Execution failed");
       setStatus("error");
-      setError(err.message);
-      setOutput((prev) => [...prev, `❌ Error: ${err.message}`]);
-      onExecutionComplete?.(String(err?.message || "Execution failed"), "error");
+      setError(message);
+      setOutput((prev) => {
+        const next = [...prev, `❌ Error: ${message}`];
+        onExecutionComplete?.(next.join("\n"), "error");
+        return next;
+      });
     }
   };
 

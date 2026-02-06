@@ -9,7 +9,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { basename, resolve, isAbsolute } from "path";
+import { basename, resolve, isAbsolute, sep } from "path";
 import {
   GoogleGenerativeAI,
   SchemaType,
@@ -39,7 +39,9 @@ function detectWorkspaceRoot(): string {
 
 // Default workspace path - the vibe-control project itself
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
-console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
+if (process.env.DEBUG_AGENT === "1") {
+  console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
+}
 
 // Tool definitions for Gemini
 const tools: FunctionDeclaration[] = [
@@ -138,27 +140,35 @@ function toFunctionResponsePayload(value: unknown): object {
   return { result: value };
 }
 
-function safeResponseText(response: { text: () => string }): string | null {
+function readResponseText(response: { text: () => string }): string {
   try {
     return response.text();
   } catch (err) {
     console.error("Gemini response.text() failed", err);
-    return null;
+    throw new Error("Failed to read model response text");
   }
 }
 
-function safeFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] | null {
+function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] {
   try {
     return response.functionCalls() ?? [];
   } catch (err) {
     console.error("Gemini functionCalls() failed", err);
-    return null;
+    throw new Error("Failed to read model function calls");
   }
 }
 
 function resolveWorkspacePath(maybePath: unknown): string {
-  if (typeof maybePath !== "string" || !maybePath.trim()) return DEFAULT_WORKSPACE;
-  return isAbsolute(maybePath) ? maybePath : resolve(DEFAULT_WORKSPACE, maybePath);
+  const workspaceRoot = resolve(DEFAULT_WORKSPACE);
+  if (typeof maybePath !== "string" || !maybePath.trim()) return workspaceRoot;
+
+  const resolvedPath = resolve(isAbsolute(maybePath) ? maybePath : resolve(workspaceRoot, maybePath));
+
+  if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(workspaceRoot + sep)) {
+    throw new Error("Path outside workspace root is not allowed");
+  }
+
+  return resolvedPath;
 }
 
 async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: object; component?: UIComponent }> {
@@ -290,20 +300,23 @@ export async function POST(request: NextRequest) {
     let notedModelTruncation = false;
     let result = await chat.sendMessage(message);
 
-    for (let step = 0; step < MAX_TOOL_STEPS; step++) {
+    let stopReason: "char_limit" | "step_limit" | null = null;
+    let step = 0;
+    while (step < MAX_TOOL_STEPS) {
       const response = result.response;
-      const responseText = safeResponseText(response);
-      if (responseText === null) throw new Error("Failed to read model response text");
+      const responseText = readResponseText(response);
       if (responseText) {
         textParts.push(responseText);
         textChars += responseText.length;
       }
 
-      const calls = safeFunctionCalls(response);
-      if (calls === null) throw new Error("Failed to read model function calls");
+      const calls = readFunctionCalls(response);
       if (calls.length === 0) break;
 
-      if (textChars >= MAX_RESPONSE_CHARS) break;
+      if (textChars >= MAX_RESPONSE_CHARS) {
+        stopReason = "char_limit";
+        break;
+      }
 
       const functionResponseParts: Part[] = [];
 
@@ -351,14 +364,29 @@ export async function POST(request: NextRequest) {
       result = await chat.sendMessage(functionResponseParts);
 
       if (sawExecuteCommand) {
-        const finalText = safeResponseText(result.response);
-        if (finalText === null) throw new Error("Failed to read model response text");
+        const finalText = readResponseText(result.response);
         if (finalText) {
           textParts.push(finalText);
           textChars += finalText.length;
         }
         break;
       }
+
+      step++;
+    }
+
+    if (step >= MAX_TOOL_STEPS && stopReason === null) {
+      stopReason = "step_limit";
+    }
+
+    if (stopReason === "char_limit") {
+      textParts.unshift(
+        `Note: I stopped generating because the response reached the ${MAX_RESPONSE_CHARS} character limit.`
+      );
+    } else if (stopReason === "step_limit") {
+      textParts.unshift(
+        `Note: I reached the maximum of ${MAX_TOOL_STEPS} tool steps in this turn. Ask me to continue if something looks incomplete.`
+      );
     }
 
     if (notedModelTruncation) {
