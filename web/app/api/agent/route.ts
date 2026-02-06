@@ -170,9 +170,17 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
 function resolveWorkspacePath(maybePath: unknown): string {
   if (typeof maybePath !== "string" || !maybePath.trim()) return WORKSPACE_ROOT_REAL;
 
-  const resolvedPath = realpathSync(
-    resolve(isAbsolute(maybePath) ? maybePath : resolve(WORKSPACE_ROOT_REAL, maybePath))
-  );
+  const candidate = resolve(isAbsolute(maybePath) ? maybePath : resolve(WORKSPACE_ROOT_REAL, maybePath));
+
+  let resolvedPath: string;
+  try {
+    resolvedPath = realpathSync(candidate);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      throw new Error(`Path "${maybePath}" does not exist inside the workspace.`);
+    }
+    throw err;
+  }
 
   if (resolvedPath !== WORKSPACE_ROOT_REAL && !resolvedPath.startsWith(WORKSPACE_ROOT_WITH_SEP)) {
     throw new Error(

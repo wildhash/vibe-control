@@ -55,7 +55,21 @@ export default function Home() {
 
     if (inFlightRef.current) {
       pendingQueueRef.current.push(trimmed);
-      if (pendingQueueRef.current.length > 5) pendingQueueRef.current.shift();
+      if (pendingQueueRef.current.length > 5) {
+        pendingQueueRef.current.shift();
+        const warning: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content:
+            "Note: one of your earlier queued messages was dropped because too many were pending. Please resend if it was important.",
+          timestamp: new Date(),
+        };
+        setMessages((prev) => {
+          const next = [...prev, warning];
+          messagesRef.current = next;
+          return next;
+        });
+      }
       return;
     }
     inFlightRef.current = true;
@@ -246,13 +260,14 @@ export default function Home() {
             key={index}
             {...component.props}
             onExecutionComplete={(output, status) => {
+              const terminalStatus = status === "success" ? "success" : "error";
               setHudState((prev) => ({
                 ...prev,
                 terminal: {
                   type: "terminal_stream",
                   props: {
                     lines: String(output || "").split(/\r?\n/),
-                    status: status === "error" ? "error" : "success",
+                    status: terminalStatus,
                     command: component.props.command,
                   },
                 },
