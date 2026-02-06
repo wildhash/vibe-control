@@ -35,11 +35,19 @@ function detectWorkspaceRoot(): string {
   }
 
   const cwd = process.cwd();
-  return basename(cwd) === "web" ? resolve(cwd, "..") : cwd;
+  if (process.env.NODE_ENV !== "production" && basename(cwd) === "web") {
+    return resolve(cwd, "..");
+  }
+
+  return cwd;
 }
 
 // Default workspace path - the vibe-control project itself
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
+const WORKSPACE_ROOT_REAL = realpathSync(resolve(DEFAULT_WORKSPACE));
+const WORKSPACE_ROOT_WITH_SEP = WORKSPACE_ROOT_REAL.endsWith(sep)
+  ? WORKSPACE_ROOT_REAL
+  : WORKSPACE_ROOT_REAL + sep;
 if (process.env.DEBUG_AGENT === "1") {
   console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
 }
@@ -160,16 +168,13 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
 }
 
 function resolveWorkspacePath(maybePath: unknown): string {
-  const workspaceRoot = realpathSync(resolve(DEFAULT_WORKSPACE));
-  if (typeof maybePath !== "string" || !maybePath.trim()) return workspaceRoot;
+  if (typeof maybePath !== "string" || !maybePath.trim()) return WORKSPACE_ROOT_REAL;
 
   const resolvedPath = realpathSync(
-    resolve(isAbsolute(maybePath) ? maybePath : resolve(workspaceRoot, maybePath))
+    resolve(isAbsolute(maybePath) ? maybePath : resolve(WORKSPACE_ROOT_REAL, maybePath))
   );
 
-  const rootWithSep = workspaceRoot.endsWith(sep) ? workspaceRoot : workspaceRoot + sep;
-
-  if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(rootWithSep)) {
+  if (resolvedPath !== WORKSPACE_ROOT_REAL && !resolvedPath.startsWith(WORKSPACE_ROOT_WITH_SEP)) {
     throw new Error(
       `Path "${maybePath}" is outside the workspace root. Use a path under the project directory instead.`
     );
