@@ -39,6 +39,7 @@ function detectWorkspaceRoot(): string {
 
 // Default workspace path - the vibe-control project itself
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
+console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
 
 // Tool definitions for Gemini
 const tools: FunctionDeclaration[] = [
@@ -137,21 +138,21 @@ function toFunctionResponsePayload(value: unknown): object {
   return { result: value };
 }
 
-function safeResponseText(response: { text: () => string }): string {
+function safeResponseText(response: { text: () => string }): string | null {
   try {
     return response.text();
   } catch (err) {
     console.error("Gemini response.text() failed", err);
-    return "";
+    return null;
   }
 }
 
-function safeFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] {
+function safeFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] | null {
   try {
     return response.functionCalls() ?? [];
   } catch (err) {
     console.error("Gemini functionCalls() failed", err);
-    return [];
+    return null;
   }
 }
 
@@ -282,18 +283,27 @@ export async function POST(request: NextRequest) {
     // Send user message
     const components: UIComponent[] = [];
     const textParts: string[] = [];
+    let textChars = 0;
     let fallbackText = "";
 
     let sawExecuteCommand = false;
+    let notedModelTruncation = false;
     let result = await chat.sendMessage(message);
 
     for (let step = 0; step < MAX_TOOL_STEPS; step++) {
       const response = result.response;
       const responseText = safeResponseText(response);
-      if (responseText) textParts.push(responseText);
+      if (responseText === null) throw new Error("Failed to read model response text");
+      if (responseText) {
+        textParts.push(responseText);
+        textChars += responseText.length;
+      }
 
       const calls = safeFunctionCalls(response);
+      if (calls === null) throw new Error("Failed to read model function calls");
       if (calls.length === 0) break;
+
+      if (textChars >= MAX_RESPONSE_CHARS) break;
 
       const functionResponseParts: Part[] = [];
 
@@ -320,6 +330,14 @@ export async function POST(request: NextRequest) {
         const { modelResponse, component } = await handleToolCall(toolCall);
         if (component) components.push(component);
 
+        if (
+          toolCall.name === "read_file" &&
+          typeof (modelResponse as any)?.truncated === "boolean" &&
+          (modelResponse as any).truncated
+        ) {
+          notedModelTruncation = true;
+        }
+
         functionResponseParts.push({
           functionResponse: {
             name: toolCall.name,
@@ -334,9 +352,19 @@ export async function POST(request: NextRequest) {
 
       if (sawExecuteCommand) {
         const finalText = safeResponseText(result.response);
-        if (finalText) textParts.push(finalText);
+        if (finalText === null) throw new Error("Failed to read model response text");
+        if (finalText) {
+          textParts.push(finalText);
+          textChars += finalText.length;
+        }
         break;
       }
+    }
+
+    if (notedModelTruncation) {
+      textParts.unshift(
+        `Note: for large files, only the first ${MAX_FILE_CHARS_FOR_MODEL} characters are sent back to the model.`
+      );
     }
 
     const textContent = textParts

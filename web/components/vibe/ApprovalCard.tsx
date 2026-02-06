@@ -13,7 +13,7 @@ export const ApprovalCardSchema = z.object({
 export type ApprovalCardProps = z.infer<typeof ApprovalCardSchema> & {
   onApprove?: (token: string) => void;
   onDeny?: () => void;
-  onExecutionComplete?: (output: string) => void;
+  onExecutionComplete?: (output: string, status: "success" | "error") => void;
 };
 
 type Status = "pending" | "approving" | "approved" | "executing" | "success" | "denied" | "error";
@@ -77,7 +77,7 @@ export function ApprovalCard({
         
         setOutput(["$ " + command, ...outputText.split("\n")]);
         setStatus("success");
-        onExecutionComplete?.(outputText);
+        onExecutionComplete?.(outputText, "success");
       } else {
         throw new Error(execData.error || "Execution failed");
       }
@@ -85,6 +85,7 @@ export function ApprovalCard({
       setStatus("error");
       setError(err.message);
       setOutput((prev) => [...prev, `❌ Error: ${err.message}`]);
+      onExecutionComplete?.(String(err?.message || "Execution failed"), "error");
     }
   };
 

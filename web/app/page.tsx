@@ -31,13 +31,14 @@ interface Message {
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
+  // Mirror of messages to avoid stale closures in async `sendMessage` and queued sends.
   const messagesRef = useRef<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [activeHudTab, setActiveHudTab] = useState<HudTab>("workspace");
   const [hudState, setHudState] = useState<HudState>({});
   const inFlightRef = useRef(false);
-  const pendingMessageRef = useRef<string | null>(null);
+  const pendingQueueRef = useRef<string[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -57,7 +58,7 @@ export default function Home() {
     if (!trimmed) return;
 
     if (inFlightRef.current) {
-      pendingMessageRef.current = trimmed;
+      pendingQueueRef.current.push(trimmed);
       return;
     }
     inFlightRef.current = true;
@@ -100,23 +101,41 @@ export default function Home() {
 
       const hudUpdates: HudState = {};
       const chatComponents: UIComponent[] = [];
+      let nextActiveTab: HudTab | null = null;
+      const hudTabPriority: Record<HudTab, number> = {
+        workspace: 1,
+        code: 2,
+        terminal: 3,
+        diff: 4,
+      };
+
+      const maybeSetActiveTab = (tab: HudTab) => {
+        if (!nextActiveTab) {
+          nextActiveTab = tab;
+          return;
+        }
+        if (hudTabPriority[tab] > hudTabPriority[nextActiveTab]) {
+          nextActiveTab = tab;
+        }
+      };
+
       for (const comp of (data.components || []) as UIComponent[]) {
         switch (comp.type) {
           case "workspace_tree":
             hudUpdates.workspace = comp;
-            setActiveHudTab("workspace");
+            maybeSetActiveTab("workspace");
             break;
           case "code_panel":
             hudUpdates.code = comp;
-            setActiveHudTab("code");
+            maybeSetActiveTab("code");
             break;
           case "terminal_stream":
             hudUpdates.terminal = comp;
-            setActiveHudTab("terminal");
+            maybeSetActiveTab("terminal");
             break;
           case "diff_review":
             hudUpdates.diff = comp;
-            setActiveHudTab("diff");
+            maybeSetActiveTab("diff");
             break;
           default:
             chatComponents.push(comp);
@@ -125,6 +144,7 @@ export default function Home() {
 
       if (Object.keys(hudUpdates).length > 0) {
         setHudState((prev) => ({ ...prev, ...hudUpdates }));
+        if (nextActiveTab) setActiveHudTab(nextActiveTab);
       }
 
       const assistantMessage: Message = {
@@ -157,8 +177,7 @@ export default function Home() {
       setIsLoading(false);
       inFlightRef.current = false;
 
-      const pending = pendingMessageRef.current;
-      pendingMessageRef.current = null;
+      const pending = pendingQueueRef.current.shift();
       if (pending) void sendMessage(pending);
     }
   };
@@ -228,14 +247,14 @@ export default function Home() {
           <ApprovalCard
             key={index}
             {...component.props}
-            onExecutionComplete={(output) => {
+            onExecutionComplete={(output, status) => {
               setHudState((prev) => ({
                 ...prev,
                 terminal: {
                   type: "terminal_stream",
                   props: {
                     lines: String(output || "").split(/\r?\n/),
-                    status: "success",
+                    status: status === "error" ? "error" : "success",
                     command: component.props.command,
                   },
                 },
