@@ -166,7 +166,8 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
 
 function isOutsideWorkspace(path: string): boolean {
   const rel = relative(WORKSPACE_ROOT_REAL, path);
-  return rel === ".." || rel.startsWith(".." + sep) || isAbsolute(rel);
+  if (!rel) return false;
+  return isAbsolute(rel) || rel.split(sep)[0] === "..";
 }
 
 function resolveWorkspacePath(maybePath: unknown): string {
@@ -177,6 +178,7 @@ function resolveWorkspacePath(maybePath: unknown): string {
 
   // Policy: absolute paths are allowed only when they already sit under the workspace root.
   // This keeps tool traces portable and avoids accessing the workspace via host-specific symlinks.
+  // The post-`realpathSync` check below is the authoritative guard for symlink escapes.
   if (isOutsideWorkspace(candidate)) {
     throw new Error(
       `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`

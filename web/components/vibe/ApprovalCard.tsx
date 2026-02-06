@@ -33,6 +33,7 @@ export function ApprovalCard({
   const outputRef = useRef<string[]>([]);
   const approveInFlightRef = useRef(false);
 
+  // Always use `setOutputLines` so `outputRef` stays in sync with React state.
   const setOutputLines = (next: string[]) => {
     outputRef.current = next;
     setOutput(next);
