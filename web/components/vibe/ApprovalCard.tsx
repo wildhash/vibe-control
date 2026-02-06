@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { z } from "zod";
 
 export const ApprovalCardSchema = z.object({
@@ -30,6 +30,12 @@ export function ApprovalCard({
   const [status, setStatus] = useState<Status>("pending");
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string[]>([]);
+  const outputRef = useRef<string[]>([]);
+
+  const setOutputLines = (next: string[]) => {
+    outputRef.current = next;
+    setOutput(next);
+  };
 
   const handleApprove = async () => {
     setStatus("approving");
@@ -60,7 +66,7 @@ export function ApprovalCard({
 
       // Step 2: Execute the command
       setStatus("executing");
-      setOutput(["$ " + command, "Executing..."]);
+      setOutputLines(["$ " + command, "Executing..."]);
 
       const execResponse = await fetch("/api/execute", {
         method: "POST",
@@ -76,7 +82,7 @@ export function ApprovalCard({
           : execData.output?.content?.[0]?.text || JSON.stringify(execData.output);
 
         const lines = ["$ " + command, ...outputText.split("\n")];
-        setOutput(lines);
+        setOutputLines(lines);
         setStatus("success");
         onExecutionComplete?.(lines.join("\n"), "success");
       } else {
@@ -86,8 +92,8 @@ export function ApprovalCard({
       const message = String(err?.message || "Execution failed");
       setStatus("error");
       setError(message);
-      const next = [...output, `❌ Error: ${message}`];
-      setOutput(next);
+      const next = [...outputRef.current, `❌ Error: ${message}`];
+      setOutputLines(next);
       onExecutionComplete?.(next.join("\n"), "error");
     }
   };

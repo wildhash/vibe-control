@@ -177,12 +177,6 @@ function resolveWorkspacePath(maybePath: unknown): string {
 
   // Policy: absolute paths are allowed only when they already sit under the workspace root.
   // This keeps tool traces portable and avoids accessing the workspace via host-specific symlinks.
-  if (isAbsolute(inputPath) && isOutsideWorkspace(candidate)) {
-    throw new Error(
-      `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`
-    );
-  }
-
   if (isOutsideWorkspace(candidate)) {
     throw new Error(
       `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`
