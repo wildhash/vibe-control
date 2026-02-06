@@ -165,6 +165,7 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
   }
 }
 
+// Authoritative guard for ensuring an absolute path stays under the workspace root.
 function isOutsideWorkspace(absolutePath: string): boolean {
   const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
   if (!rel) return false;
@@ -173,6 +174,7 @@ function isOutsideWorkspace(absolutePath: string): boolean {
 
 function toWorkspaceRelativePath(absolutePath: string): string {
   const rel = relative(WORKSPACE_ROOT_REAL, absolutePath);
+  // Use "." for the root so consumers can safely join paths as `./file`.
   return rel || ".";
 }
 
@@ -182,7 +184,7 @@ function resolveWorkspacePath(maybePath: unknown): string {
   const inputPath = maybePath.trim();
   if (isAbsolute(inputPath)) {
     throw new Error(
-      `Absolute path "${inputPath}" is not allowed. Use a path relative to the workspace root instead.`
+      "Absolute paths are not allowed. Use a path relative to the workspace root instead."
     );
   }
 
