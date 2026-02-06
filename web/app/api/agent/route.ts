@@ -9,10 +9,14 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
+import { basename, resolve, isAbsolute, normalize, relative } from "path";
+import { realpathSync } from "fs";
 import {
   GoogleGenerativeAI,
   SchemaType,
   type FunctionDeclaration,
+  type FunctionCall,
+  type Part,
 } from "@google/generative-ai";
 import {
   workspaceList,
@@ -24,8 +28,26 @@ import {
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
+function detectWorkspaceRoot(): string {
+  const override = process.env.WORKSPACE_ROOT;
+  if (override && override.trim()) {
+    return resolve(override);
+  }
+
+  const cwd = process.cwd();
+  if (process.env.NODE_ENV !== "production" && basename(cwd) === "web") {
+    return resolve(cwd, "..");
+  }
+
+  return cwd;
+}
+
 // Default workspace path - the vibe-control project itself
-const DEFAULT_WORKSPACE = process.cwd();
+const DEFAULT_WORKSPACE = detectWorkspaceRoot();
+const WORKSPACE_ROOT_REAL = normalize(realpathSync(resolve(DEFAULT_WORKSPACE)));
+if (process.env.DEBUG_AGENT === "1") {
+  console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
+}
 
 // Tool definitions for Gemini
 const tools: FunctionDeclaration[] = [
@@ -37,7 +59,7 @@ const tools: FunctionDeclaration[] = [
       properties: {
         path: { 
           type: SchemaType.STRING,
-          description: "Directory path to list. Default is the current workspace root."
+          description: "Workspace-relative directory path to list (e.g. `web/app`). Default is the workspace root."
         },
         depth: { type: SchemaType.NUMBER, description: "Depth to traverse (default: 2)" },
       },
@@ -50,7 +72,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        path: { type: SchemaType.STRING, description: "Full file path to read" },
+        path: { type: SchemaType.STRING, description: "Workspace-relative file path to read (e.g. `web/app/page.tsx`)" },
       },
       required: ["path"],
     },
@@ -63,7 +85,7 @@ const tools: FunctionDeclaration[] = [
       properties: {
         command: { type: SchemaType.STRING, description: "Command to execute" },
         reason: { type: SchemaType.STRING, description: "Why this command is needed" },
-        cwd: { type: SchemaType.STRING, description: "Working directory (optional)" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative working directory (optional)" },
       },
       required: ["command", "reason"],
     },
@@ -74,7 +96,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: SchemaType.STRING, description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative path (optional)" },
       },
       required: [],
     },
@@ -85,7 +107,7 @@ const tools: FunctionDeclaration[] = [
     parameters: {
       type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: SchemaType.STRING, description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Workspace-relative path (optional)" },
       },
       required: [],
     },
@@ -96,13 +118,14 @@ const SYSTEM_PROMPT = `You are VibeControl, an AI-powered IDE assistant. You hel
 
 IMPORTANT RULES:
 1. When users ask about project structure, files, or folders - call list_workspace_files
-2. When users ask to see/read a file - call read_file with the full path
+2. When users ask to see/read a file - call read_file with a workspace-relative path
 3. When users ask to run commands (tests, builds, etc) - call execute_command (requires approval)
 4. When users ask about git status or changes - call get_git_status or get_git_diff
 
-The current workspace is: ${DEFAULT_WORKSPACE}
+The current workspace root is the project directory (all tool paths are relative to it).
 
 When listing files, if no path is specified, use the workspace root.
+Never use absolute paths when calling tools.
 Always be helpful and explain what you find.`;
 
 interface ToolCall {
@@ -115,38 +138,157 @@ interface UIComponent {
   props: Record<string, any>;
 }
 
-async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; component?: UIComponent }> {
+const MAX_TOOL_STEPS = 6;
+const MODEL_TEXT_SEPARATOR = "\n\n";
+const MAX_FILE_CHARS_FOR_MODEL = 20_000;
+const MAX_RESPONSE_CHARS = 30_000;
+
+function toFunctionResponsePayload(value: unknown): object {
+  return { result: value };
+}
+
+function readResponseText(response: { text: () => string }): string {
+  try {
+    return response.text();
+  } catch (err) {
+    console.error("Gemini response.text() failed", err);
+    throw new Error("Failed to read model response text");
+  }
+}
+
+function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] {
+  try {
+    return response.functionCalls() ?? [];
+  } catch (err) {
+    console.error("Gemini functionCalls() failed", err);
+    throw new Error("Failed to read model function calls");
+  }
+}
+
+// Authoritative guard for ensuring an absolute path stays under the workspace root.
+function isOutsideWorkspace(absolutePath: string): boolean {
+  const rel = relative(WORKSPACE_ROOT_REAL, normalize(absolutePath));
+  if (!rel) return false;
+  // On Windows, `relative()` can return an absolute path when drives differ.
+  if (isAbsolute(rel)) return true;
+
+  const normalized = rel.replace(/\\/g, "/");
+  return normalized === ".." || normalized.startsWith("../");
+}
+
+function toWorkspaceRelativePath(absolutePath: string): string {
+  return relative(WORKSPACE_ROOT_REAL, absolutePath) || ".";
+}
+
+function resolveWorkspacePath(
+  maybePath: unknown,
+  { allowDefaultRoot = true }: { allowDefaultRoot?: boolean } = {}
+): string {
+  if (typeof maybePath !== "string" || !maybePath.trim()) {
+    if (!allowDefaultRoot) {
+      throw new Error("A non-empty workspace-relative path is required.");
+    }
+    return WORKSPACE_ROOT_REAL;
+  }
+
+  const inputPath = maybePath.trim();
+  if (inputPath === "." || inputPath === "./" || inputPath === ".\\") {
+    if (!allowDefaultRoot) {
+      throw new Error("A non-empty workspace-relative path is required.");
+    }
+    return WORKSPACE_ROOT_REAL;
+  }
+
+  const segments = inputPath.split(/[/\\]+/);
+  if (segments.includes("..")) {
+    throw new Error("Parent directory references (..) are not allowed in workspace-relative paths.");
+  }
+
+  if (isAbsolute(inputPath)) {
+    throw new Error(
+      "Absolute paths are not allowed. Use a path relative to the workspace root instead."
+    );
+  }
+
+  const candidate = resolve(WORKSPACE_ROOT_REAL, inputPath);
+
+  // Policy: tools must use workspace-relative paths.
+  // This keeps tool traces portable and avoids accessing the workspace via host-specific absolute paths.
+  // The post-`realpathSync` check below is the authoritative guard for symlink escapes.
+  if (isOutsideWorkspace(candidate)) {
+    throw new Error(
+      `Path "${inputPath}" is outside the workspace root. Use a path under the project directory instead.`
+    );
+  }
+
+  let resolvedPath: string;
+  try {
+    resolvedPath = realpathSync(candidate);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      throw new Error(`Path "${inputPath}" does not exist inside the workspace.`);
+    }
+    throw err;
+  }
+
+  if (isOutsideWorkspace(resolvedPath)) {
+    throw new Error(
+      `Path "${inputPath}" resolves outside the workspace root (possible symlink escape). Use a path under the project directory instead.`
+    );
+  }
+
+  return resolvedPath;
+}
+
+async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: object; component?: UIComponent }> {
   const { name, args } = toolCall;
 
   try {
     switch (name) {
       case "list_workspace_files": {
-        const path = args.path || DEFAULT_WORKSPACE;
-        const tree = await workspaceList(path, args.depth || 2);
+        const absolutePath = resolveWorkspacePath(args.path);
+        const modelPath = toWorkspaceRelativePath(absolutePath);
+        const tree = await workspaceList(absolutePath, args.depth || 2);
         return {
-          result: tree,
+          modelResponse: { path: modelPath, tree },
           component: {
             type: "workspace_tree",
-            props: { tree, rootPath: path },
+            props: { tree, rootPath: modelPath },
           },
         };
       }
 
       case "read_file": {
-        const content = await workspaceRead(args.path);
-        const ext = args.path.split(".").pop() || "text";
+        const absolutePath = resolveWorkspacePath(args.path, { allowDefaultRoot: false });
+        const modelPath = toWorkspaceRelativePath(absolutePath);
+        const content = await workspaceRead(absolutePath);
+        const displayPath = modelPath;
+        const ext = displayPath.split(".").pop() || "text";
         const langMap: Record<string, string> = {
           ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript",
           py: "python", json: "json", md: "markdown", css: "css", html: "html",
         };
+
+        const wasTruncated = content.length > MAX_FILE_CHARS_FOR_MODEL;
+        const omittedChars = wasTruncated ? content.length - MAX_FILE_CHARS_FOR_MODEL : 0;
+        const modelContent = wasTruncated ? content.slice(0, MAX_FILE_CHARS_FOR_MODEL) : content;
+
         return {
-          result: content,
+          modelResponse: {
+            path: modelPath,
+            content: modelContent,
+            truncated: wasTruncated,
+            totalChars: content.length,
+            omittedChars,
+          },
           component: {
             type: "code_panel",
             props: {
               code: content,
               language: langMap[ext] || "plaintext",
-              filename: args.path.split(/[/\\]/).pop() || args.path,
+              filename: displayPath.split(/[/\\]/).pop() || displayPath,
+              truncated: wasTruncated,
+              omittedChars,
             },
           },
         };
@@ -155,7 +297,12 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; compon
       case "execute_command": {
         const result = await requestApproval("terminal_run", args.reason, args.command);
         return {
-          result,
+          modelResponse: {
+            ...result,
+            action: "terminal_run",
+            reason: args.reason,
+            command: args.command,
+          },
           component: {
             type: "approval_card",
             props: {
@@ -169,22 +316,24 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ result: any; compon
       }
 
       case "get_git_status": {
-        const cwd = args.cwd || DEFAULT_WORKSPACE;
-        const result = await gitStatus(cwd);
-        return { result };
+        const absoluteCwd = resolveWorkspacePath(args.cwd);
+        const cwd = toWorkspaceRelativePath(absoluteCwd);
+        const result = await gitStatus(absoluteCwd);
+        return { modelResponse: { cwd, status: result } };
       }
 
       case "get_git_diff": {
-        const cwd = args.cwd || DEFAULT_WORKSPACE;
-        const result = await gitDiff(cwd);
-        return { result };
+        const absoluteCwd = resolveWorkspacePath(args.cwd);
+        const cwd = toWorkspaceRelativePath(absoluteCwd);
+        const result = await gitDiff(absoluteCwd);
+        return { modelResponse: { cwd, diff: result } };
       }
 
       default:
-        return { result: { error: `Unknown tool: ${name}` } };
+        return { modelResponse: { error: `Unknown tool: ${name}` } };
     }
   } catch (error: any) {
-    return { result: { error: error.message } };
+    return { modelResponse: { error: error.message } };
   }
 }
 
@@ -216,54 +365,118 @@ export async function POST(request: NextRequest) {
     });
 
     // Send user message
-    const result = await chat.sendMessage(message);
-    const response = result.response;
-
-    // Check for function calls
-    const candidates = response.candidates || [];
-    const parts = candidates[0]?.content?.parts || [];
-    
     const components: UIComponent[] = [];
-    let textContent = "";
+    const textParts: string[] = [];
+    let textChars = 0;
+    let fallbackText = "";
 
-    for (const part of parts) {
-      if (part.text) {
-        textContent += part.text;
+    let sawExecuteCommand = false;
+    let notedModelTruncation = false;
+    let result = await chat.sendMessage(message);
+
+    let stopReason: "char_limit" | "step_limit" | null = null;
+    let step = 0;
+    while (step < MAX_TOOL_STEPS) {
+      const response = result.response;
+      const responseText = readResponseText(response);
+      if (responseText) {
+        textParts.push(responseText);
+        textChars += responseText.length;
       }
-      
-      if (part.functionCall) {
+
+      const calls = readFunctionCalls(response);
+      if (calls.length === 0) break;
+
+      if (textChars >= MAX_RESPONSE_CHARS) {
+        stopReason = "char_limit";
+        break;
+      }
+
+      const functionResponseParts: Part[] = [];
+
+      for (const call of calls) {
         const toolCall: ToolCall = {
-          name: part.functionCall.name,
-          args: part.functionCall.args as Record<string, any>,
+          name: call.name,
+          args: call.args as Record<string, any>,
         };
-        
-        const { result, component } = await handleToolCall(toolCall);
-        
-        if (component) {
-          components.push(component);
+
+        switch (toolCall.name) {
+          case "list_workspace_files":
+            fallbackText = "Here's the project structure:";
+            break;
+          case "read_file":
+            fallbackText = "Here's the file:";
+            break;
+          case "execute_command":
+            fallbackText = "This command requires your approval:";
+            break;
+          default:
+            if (!fallbackText) fallbackText = "Here's what I found:";
         }
-        
-        // Add text about what was done if no text yet
-        if (!textContent) {
-          switch (toolCall.name) {
-            case "list_workspace_files":
-              textContent = "Here's the project structure:";
-              break;
-            case "read_file":
-              textContent = `Here's the content of ${toolCall.args.path}:`;
-              break;
-            case "execute_command":
-              textContent = "This command requires your approval:";
-              break;
-            default:
-              textContent = "Here's what I found:";
-          }
+
+        const { modelResponse, component } = await handleToolCall(toolCall);
+        if (component) components.push(component);
+
+        if (
+          toolCall.name === "read_file" &&
+          typeof (modelResponse as any)?.truncated === "boolean" &&
+          (modelResponse as any).truncated
+        ) {
+          notedModelTruncation = true;
         }
+
+        functionResponseParts.push({
+          functionResponse: {
+            name: toolCall.name,
+            response: toFunctionResponsePayload(modelResponse),
+          },
+        });
+
+        if (toolCall.name === "execute_command") sawExecuteCommand = true;
       }
+
+      result = await chat.sendMessage(functionResponseParts);
+
+      if (sawExecuteCommand) {
+        const finalText = readResponseText(result.response);
+        if (finalText) {
+          textParts.push(finalText);
+          textChars += finalText.length;
+        }
+        break;
+      }
+
+      step++;
     }
 
+    if (step >= MAX_TOOL_STEPS && stopReason === null) {
+      stopReason = "step_limit";
+    }
+
+    if (stopReason === "char_limit") {
+      textParts.unshift(
+        `Note: I stopped generating because the response reached the ${MAX_RESPONSE_CHARS} character limit.`
+      );
+    } else if (stopReason === "step_limit") {
+      textParts.unshift(
+        `Note: I reached the maximum of ${MAX_TOOL_STEPS} tool steps in this turn. Ask me to continue if something looks incomplete.`
+      );
+    }
+
+    if (notedModelTruncation) {
+      textParts.unshift(
+        `Note: for large files, only the first ${MAX_FILE_CHARS_FOR_MODEL} characters are sent back to the model.`
+      );
+    }
+
+    const textContent = textParts
+      .filter(Boolean)
+      .join(MODEL_TEXT_SEPARATOR)
+      .slice(0, MAX_RESPONSE_CHARS)
+      .trim();
+
     return NextResponse.json({
-      content: textContent || "I'm ready to help you explore your codebase!",
+      content: textContent || fallbackText || "I'm ready to help you explore your codebase!",
       components,
     });
   } catch (error: any) {

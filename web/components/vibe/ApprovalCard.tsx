@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { z } from "zod";
 
 export const ApprovalCardSchema = z.object({
@@ -13,7 +13,7 @@ export const ApprovalCardSchema = z.object({
 export type ApprovalCardProps = z.infer<typeof ApprovalCardSchema> & {
   onApprove?: (token: string) => void;
   onDeny?: () => void;
-  onExecutionComplete?: (output: string) => void;
+  onExecutionComplete?: (output: string, status: "success" | "error") => void;
 };
 
 type Status = "pending" | "approving" | "approved" | "executing" | "success" | "denied" | "error";
@@ -30,8 +30,19 @@ export function ApprovalCard({
   const [status, setStatus] = useState<Status>("pending");
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string[]>([]);
+  const outputRef = useRef<string[]>([]);
+  const approveInFlightRef = useRef(false);
+
+  // Always use `setOutputLines` so `outputRef` stays in sync with React state.
+  const setOutputLines = (next: string[]) => {
+    outputRef.current = next;
+    setOutput(next);
+  };
 
   const handleApprove = async () => {
+    if (approveInFlightRef.current) return;
+    approveInFlightRef.current = true;
+
     setStatus("approving");
     setError(null);
 
@@ -60,7 +71,7 @@ export function ApprovalCard({
 
       // Step 2: Execute the command
       setStatus("executing");
-      setOutput(["$ " + command, "Executing..."]);
+      setOutputLines(["$ " + command, "Executing..."]);
 
       const execResponse = await fetch("/api/execute", {
         method: "POST",
@@ -74,17 +85,23 @@ export function ApprovalCard({
         const outputText = typeof execData.output === "string" 
           ? execData.output 
           : execData.output?.content?.[0]?.text || JSON.stringify(execData.output);
-        
-        setOutput(["$ " + command, ...outputText.split("\n")]);
+
+        const lines = ["$ " + command, ...outputText.split("\n")];
+        setOutputLines(lines);
         setStatus("success");
-        onExecutionComplete?.(outputText);
+        onExecutionComplete?.(lines.join("\n"), "success");
       } else {
         throw new Error(execData.error || "Execution failed");
       }
     } catch (err: any) {
+      const message = String(err?.message || "Execution failed");
       setStatus("error");
-      setError(err.message);
-      setOutput((prev) => [...prev, `❌ Error: ${err.message}`]);
+      setError(message);
+      const next = [...outputRef.current, `❌ Error: ${message}`];
+      setOutputLines(next);
+      onExecutionComplete?.(next.join("\n"), "error");
+    } finally {
+      approveInFlightRef.current = false;
     }
   };
 
