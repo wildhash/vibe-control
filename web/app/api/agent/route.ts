@@ -28,6 +28,11 @@ import {
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 
 function detectWorkspaceRoot(): string {
+  const override = process.env.WORKSPACE_ROOT;
+  if (override && override.trim()) {
+    return resolve(override);
+  }
+
   const cwd = process.cwd();
   return basename(cwd) === "web" ? resolve(cwd, "..") : cwd;
 }
@@ -126,16 +131,17 @@ interface UIComponent {
 const MAX_TOOL_STEPS = 6;
 const MODEL_TEXT_SEPARATOR = "\n\n";
 const MAX_FILE_CHARS_FOR_MODEL = 20_000;
+const MAX_RESPONSE_CHARS = 30_000;
 
 function toFunctionResponsePayload(value: unknown): object {
-  if (value && typeof value === "object" && !Array.isArray(value)) return value as object;
   return { result: value };
 }
 
 function safeResponseText(response: { text: () => string }): string {
   try {
     return response.text();
-  } catch {
+  } catch (err) {
+    console.error("Gemini response.text() failed", err);
     return "";
   }
 }
@@ -143,7 +149,8 @@ function safeResponseText(response: { text: () => string }): string {
 function safeFunctionCalls(response: { functionCalls: () => FunctionCall[] | undefined }): FunctionCall[] {
   try {
     return response.functionCalls() ?? [];
-  } catch {
+  } catch (err) {
+    console.error("Gemini functionCalls() failed", err);
     return [];
   }
 }
@@ -180,6 +187,7 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
         };
 
         const wasTruncated = content.length > MAX_FILE_CHARS_FOR_MODEL;
+        const omittedChars = wasTruncated ? content.length - MAX_FILE_CHARS_FOR_MODEL : 0;
         const modelContent = wasTruncated ? content.slice(0, MAX_FILE_CHARS_FOR_MODEL) : content;
 
         return {
@@ -188,6 +196,7 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
             content: modelContent,
             truncated: wasTruncated,
             totalChars: content.length,
+            omittedChars,
           },
           component: {
             type: "code_panel",
@@ -195,6 +204,8 @@ async function handleToolCall(toolCall: ToolCall): Promise<{ modelResponse: obje
               code: content,
               language: langMap[ext] || "plaintext",
               filename: path.split(/[/\\]/).pop() || path,
+              truncated: wasTruncated,
+              omittedChars,
             },
           },
         };
@@ -292,20 +303,18 @@ export async function POST(request: NextRequest) {
           args: call.args as Record<string, any>,
         };
 
-        if (!fallbackText) {
-          switch (toolCall.name) {
-            case "list_workspace_files":
-              fallbackText = "Here's the project structure:";
-              break;
-            case "read_file":
-              fallbackText = "Here's the file:";
-              break;
-            case "execute_command":
-              fallbackText = "This command requires your approval:";
-              break;
-            default:
-              fallbackText = "Here's what I found:";
-          }
+        switch (toolCall.name) {
+          case "list_workspace_files":
+            fallbackText = "Here's the project structure:";
+            break;
+          case "read_file":
+            fallbackText = "Here's the file:";
+            break;
+          case "execute_command":
+            fallbackText = "This command requires your approval:";
+            break;
+          default:
+            if (!fallbackText) fallbackText = "Here's what I found:";
         }
 
         const { modelResponse, component } = await handleToolCall(toolCall);
@@ -330,7 +339,11 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const textContent = textParts.filter(Boolean).join(MODEL_TEXT_SEPARATOR).trim();
+    const textContent = textParts
+      .filter(Boolean)
+      .join(MODEL_TEXT_SEPARATOR)
+      .slice(0, MAX_RESPONSE_CHARS)
+      .trim();
 
     return NextResponse.json({
       content: textContent || fallbackText || "I'm ready to help you explore your codebase!",

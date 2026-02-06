@@ -17,7 +17,9 @@ interface UIComponent {
   props: any;
 }
 
-type HudTab = "workspace" | "code" | "terminal" | "diff";
+const HUD_TABS = ["workspace", "code", "terminal", "diff"] as const;
+type HudTab = (typeof HUD_TABS)[number];
+type HudState = Partial<Record<HudTab, UIComponent>>;
 
 interface Message {
   id: string;
@@ -29,15 +31,13 @@ interface Message {
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const messagesRef = useRef<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [activeHudTab, setActiveHudTab] = useState<HudTab>("workspace");
-  const [hudState, setHudState] = useState<{
-    workspace?: UIComponent;
-    code?: UIComponent;
-    terminal?: UIComponent;
-    diff?: UIComponent;
-  }>({});
+  const [hudState, setHudState] = useState<HudState>({});
+  const inFlightRef = useRef(false);
+  const pendingMessageRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -48,17 +48,37 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
   const sendMessage = async (text: string) => {
-    if (!text.trim() || isLoading) return;
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    if (inFlightRef.current) {
+      pendingMessageRef.current = trimmed;
+      return;
+    }
+    inFlightRef.current = true;
+
+    const history = messagesRef.current.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: "user",
-      content: text.trim(),
+      content: trimmed,
       timestamp: new Date(),
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages((prev) => {
+      const next = [...prev, userMessage];
+      messagesRef.current = next;
+      return next;
+    });
     setInput("");
     setIsLoading(true);
 
@@ -68,10 +88,7 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: userMessage.content,
-          history: messages.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
+          history,
         }),
       });
 
@@ -81,7 +98,7 @@ export default function Home() {
 
       const data = await response.json();
 
-      const hudUpdates: Partial<typeof hudState> = {};
+      const hudUpdates: HudState = {};
       const chatComponents: UIComponent[] = [];
       for (const comp of (data.components || []) as UIComponent[]) {
         switch (comp.type) {
@@ -118,7 +135,11 @@ export default function Home() {
         timestamp: new Date(),
       };
 
-      setMessages((prev) => [...prev, assistantMessage]);
+      setMessages((prev) => {
+        const next = [...prev, assistantMessage];
+        messagesRef.current = next;
+        return next;
+      });
     } catch (error) {
       console.error("Error:", error);
       const errorMessage: Message = {
@@ -127,9 +148,18 @@ export default function Home() {
         content: "Sorry, something went wrong. Please try again.",
         timestamp: new Date(),
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      setMessages((prev) => {
+        const next = [...prev, errorMessage];
+        messagesRef.current = next;
+        return next;
+      });
     } finally {
       setIsLoading(false);
+      inFlightRef.current = false;
+
+      const pending = pendingMessageRef.current;
+      pendingMessageRef.current = null;
+      if (pending) void sendMessage(pending);
     }
   };
 
@@ -153,7 +183,14 @@ export default function Home() {
         );
       case "code":
         return hudState.code ? (
-          <CodePanel {...hudState.code.props} />
+          <div className="space-y-2">
+            {hudState.code.props?.truncated && (
+              <div className="text-xs text-amber-400 px-3 py-2 bg-amber-950/20 border border-amber-500/20 rounded-lg">
+                Note: this file was truncated for the model ({String(hudState.code.props?.omittedChars || 0)} chars omitted).
+              </div>
+            )}
+            <CodePanel {...hudState.code.props} />
+          </div>
         ) : (
           <div className="text-sm text-zinc-500 p-4">
             Ask me to read a file to populate the code view.
@@ -197,7 +234,7 @@ export default function Home() {
                 terminal: {
                   type: "terminal_stream",
                   props: {
-                    lines: String(output || "").split("\n"),
+                    lines: String(output || "").split(/\r?\n/),
                     status: "success",
                     command: component.props.command,
                   },
@@ -244,14 +281,7 @@ export default function Home() {
         {/* Persistent HUD */}
         <aside className="w-[420px] border-r border-zinc-800 bg-zinc-950/40 flex flex-col min-h-0">
           <div className="flex items-center gap-1 p-3 border-b border-zinc-800">
-            {(
-              [
-                { id: "workspace", label: "Workspace" },
-                { id: "code", label: "Code" },
-                { id: "terminal", label: "Terminal" },
-                { id: "diff", label: "Diff" },
-              ] as const
-            ).map(({ id, label }) => (
+            {HUD_TABS.map((id) => (
               <button
                 key={id}
                 onClick={() => setActiveHudTab(id)}
@@ -261,7 +291,7 @@ export default function Home() {
                     : "bg-transparent border-transparent text-zinc-500 hover:text-zinc-200 hover:bg-zinc-900"
                 }`}
               >
-                {label}
+                {id.charAt(0).toUpperCase() + id.slice(1)}
               </button>
             ))}
           </div>
