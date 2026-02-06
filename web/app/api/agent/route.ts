@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { basename, resolve, isAbsolute, sep } from "path";
+import { realpathSync } from "fs";
 import {
   GoogleGenerativeAI,
   SchemaType,
@@ -159,12 +160,16 @@ function readFunctionCalls(response: { functionCalls: () => FunctionCall[] | und
 }
 
 function resolveWorkspacePath(maybePath: unknown): string {
-  const workspaceRoot = resolve(DEFAULT_WORKSPACE);
+  const workspaceRoot = realpathSync(resolve(DEFAULT_WORKSPACE));
   if (typeof maybePath !== "string" || !maybePath.trim()) return workspaceRoot;
 
-  const resolvedPath = resolve(isAbsolute(maybePath) ? maybePath : resolve(workspaceRoot, maybePath));
+  const resolvedPath = realpathSync(
+    resolve(isAbsolute(maybePath) ? maybePath : resolve(workspaceRoot, maybePath))
+  );
 
-  if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(workspaceRoot + sep)) {
+  const rootWithSep = workspaceRoot.endsWith(sep) ? workspaceRoot : workspaceRoot + sep;
+
+  if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(rootWithSep)) {
     throw new Error(
       `Path "${maybePath}" is outside the workspace root. Use a path under the project directory instead.`
     );
