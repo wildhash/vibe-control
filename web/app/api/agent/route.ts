@@ -9,7 +9,11 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {
+  GoogleGenerativeAI,
+  SchemaType,
+  type FunctionDeclaration,
+} from "@google/generative-ai";
 import {
   workspaceList,
   workspaceRead,
@@ -24,18 +28,18 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || "");
 const DEFAULT_WORKSPACE = process.cwd();
 
 // Tool definitions for Gemini
-const tools = [
+const tools: FunctionDeclaration[] = [
   {
     name: "list_workspace_files",
     description: "List files and directories in the workspace. Use this when user asks to see project structure, files, or folder contents.",
     parameters: {
-      type: "object",
+      type: SchemaType.OBJECT,
       properties: {
         path: { 
-          type: "string", 
-          description: `Directory path to list. Default is the current workspace: ${DEFAULT_WORKSPACE}` 
+          type: SchemaType.STRING,
+          description: "Directory path to list. Default is the current workspace root."
         },
-        depth: { type: "number", description: "Depth to traverse (default: 2)" },
+        depth: { type: SchemaType.NUMBER, description: "Depth to traverse (default: 2)" },
       },
       required: [],
     },
@@ -44,9 +48,9 @@ const tools = [
     name: "read_file",
     description: "Read the contents of a file. Use this when user asks to see code, config, or any file content.",
     parameters: {
-      type: "object",
+      type: SchemaType.OBJECT,
       properties: {
-        path: { type: "string", description: "Full file path to read" },
+        path: { type: SchemaType.STRING, description: "Full file path to read" },
       },
       required: ["path"],
     },
@@ -55,11 +59,11 @@ const tools = [
     name: "execute_command",
     description: "Execute a terminal command (npm test, npm run build, etc). This requires user approval first.",
     parameters: {
-      type: "object",
+      type: SchemaType.OBJECT,
       properties: {
-        command: { type: "string", description: "Command to execute" },
-        reason: { type: "string", description: "Why this command is needed" },
-        cwd: { type: "string", description: "Working directory (optional)" },
+        command: { type: SchemaType.STRING, description: "Command to execute" },
+        reason: { type: SchemaType.STRING, description: "Why this command is needed" },
+        cwd: { type: SchemaType.STRING, description: "Working directory (optional)" },
       },
       required: ["command", "reason"],
     },
@@ -68,9 +72,9 @@ const tools = [
     name: "get_git_status",
     description: "Get git status of the repository",
     parameters: {
-      type: "object",
+      type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: "string", description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Repository path" },
       },
       required: [],
     },
@@ -79,9 +83,9 @@ const tools = [
     name: "get_git_diff",
     description: "Get git diff of uncommitted changes",
     parameters: {
-      type: "object",
+      type: SchemaType.OBJECT,
       properties: {
-        cwd: { type: "string", description: "Repository path" },
+        cwd: { type: SchemaType.STRING, description: "Repository path" },
       },
       required: [],
     },

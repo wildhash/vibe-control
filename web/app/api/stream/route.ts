@@ -33,12 +33,3 @@ export async function GET(request: NextRequest) {
     },
   });
 }
-
-// Helper to send events to a stream
-export function sendToStream(streamId: string, event: { type: string; data: any }) {
-  const controller = streams.get(streamId);
-  if (controller) {
-    const data = JSON.stringify(event);
-    controller.enqueue(`data: ${data}\n\n`);
-  }
-}
