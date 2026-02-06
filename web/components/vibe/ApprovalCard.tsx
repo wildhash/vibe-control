@@ -31,6 +31,7 @@ export function ApprovalCard({
   const [error, setError] = useState<string | null>(null);
   const [output, setOutput] = useState<string[]>([]);
   const outputRef = useRef<string[]>([]);
+  const approveInFlightRef = useRef(false);
 
   const setOutputLines = (next: string[]) => {
     outputRef.current = next;
@@ -38,6 +39,9 @@ export function ApprovalCard({
   };
 
   const handleApprove = async () => {
+    if (approveInFlightRef.current) return;
+    approveInFlightRef.current = true;
+
     setStatus("approving");
     setError(null);
 
@@ -95,6 +99,8 @@ export function ApprovalCard({
       const next = [...outputRef.current, `❌ Error: ${message}`];
       setOutputLines(next);
       onExecutionComplete?.(next.join("\n"), "error");
+    } finally {
+      approveInFlightRef.current = false;
     }
   };
 
