@@ -165,7 +165,9 @@ function resolveWorkspacePath(maybePath: unknown): string {
   const resolvedPath = resolve(isAbsolute(maybePath) ? maybePath : resolve(workspaceRoot, maybePath));
 
   if (resolvedPath !== workspaceRoot && !resolvedPath.startsWith(workspaceRoot + sep)) {
-    throw new Error("Path outside workspace root is not allowed");
+    throw new Error(
+      `Path "${maybePath}" is outside the workspace root. Use a path under the project directory instead.`
+    );
   }
 
   return resolvedPath;

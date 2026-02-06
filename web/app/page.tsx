@@ -49,16 +49,13 @@ export default function Home() {
     scrollToBottom();
   }, [messages]);
 
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
-
   const sendMessage = async (text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
     if (inFlightRef.current) {
       pendingQueueRef.current.push(trimmed);
+      if (pendingQueueRef.current.length > 5) pendingQueueRef.current.shift();
       return;
     }
     inFlightRef.current = true;
@@ -102,11 +99,12 @@ export default function Home() {
       const hudUpdates: HudState = {};
       const chatComponents: UIComponent[] = [];
       let nextActiveTab: HudTab | null = null;
+      // Higher number = higher priority for auto-activating the HUD tab.
       const hudTabOrder: Record<HudTab, number> = {
         workspace: 1,
         code: 2,
-        terminal: 3,
-        diff: 4,
+        diff: 3,
+        terminal: 4,
       };
 
       const maybeSetActiveTab = (tab: HudTab) => {
