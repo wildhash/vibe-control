@@ -105,7 +105,8 @@ export default function Home() {
       });
 
       if (!response.ok) {
-        throw new Error("Failed to get response");
+        const errBody = await response.json().catch(() => ({}));
+        throw new Error(errBody.error || `Request failed (${response.status})`);
       }
 
       const data = await response.json();
@@ -172,12 +173,12 @@ export default function Home() {
         messagesRef.current = next;
         return next;
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error("Error:", error);
       const errorMessage: Message = {
         id: crypto.randomUUID(),
         role: "assistant",
-        content: "Sorry, something went wrong. Please try again.",
+        content: error?.message || "Sorry, something went wrong. Please try again.",
         timestamp: new Date(),
       };
       setMessages((prev) => {
