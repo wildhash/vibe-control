@@ -10,7 +10,10 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { basename, resolve, isAbsolute, normalize, relative } from "path";
-import { realpathSync } from "fs";
+import { realpathSync, existsSync } from "fs";
+
+// Allow up to 60s on Vercel (requires Pro plan for >10s; free tier caps at 10s)
+export const maxDuration = 60;
 import {
   createChatWithFallback,
   type ToolDef,
@@ -39,11 +42,14 @@ function detectWorkspaceRoot(): string {
 }
 
 const DEFAULT_WORKSPACE = detectWorkspaceRoot();
-const WORKSPACE_ROOT_REAL = normalize(realpathSync(resolve(DEFAULT_WORKSPACE)));
 
-if (process.env.DEBUG_AGENT === "1") {
-  console.log("[agent] Workspace root:", DEFAULT_WORKSPACE);
-}
+// On Vercel / serverless, the workspace may not exist. Detect this gracefully.
+const WORKSPACE_EXISTS = existsSync(DEFAULT_WORKSPACE);
+const WORKSPACE_ROOT_REAL = WORKSPACE_EXISTS
+  ? normalize(realpathSync(resolve(DEFAULT_WORKSPACE)))
+  : normalize(resolve(DEFAULT_WORKSPACE));
+
+console.log(`[agent] Workspace root: ${DEFAULT_WORKSPACE} (exists: ${WORKSPACE_EXISTS})`);
 
 function isOutsideWorkspace(absolutePath: string): boolean {
   const rel = relative(WORKSPACE_ROOT_REAL, normalize(absolutePath));
@@ -170,7 +176,8 @@ const tools: ToolDef[] = [
 // System prompt
 // ---------------------------------------------------------------------------
 
-const SYSTEM_PROMPT = `You are VibeControl, an AI-powered IDE assistant. You help users explore, understand, and modify their codebase.
+const SYSTEM_PROMPT = WORKSPACE_EXISTS
+  ? `You are VibeControl, an AI-powered IDE assistant. You help users explore, understand, and modify their codebase.
 
 IMPORTANT RULES:
 1. When users ask about project structure, files, or folders - call list_workspace_files
@@ -182,7 +189,20 @@ The current workspace root is the project directory (all tool paths are relative
 
 When listing files, if no path is specified, use the workspace root.
 Never use absolute paths when calling tools.
-Always be helpful and explain what you find.`;
+Always be helpful and explain what you find.`
+  : `You are VibeControl, an AI-powered IDE assistant running in demo/cloud mode.
+
+The workspace filesystem is NOT available in this environment (deployed on Vercel).
+You cannot browse files, read code, or run commands right now.
+
+Instead:
+- Explain what VibeControl can do when connected to a local workspace
+- Answer general coding and architecture questions
+- Help users set up VibeControl locally for the full experience
+
+If a user asks to see files or run commands, politely explain that those features
+require running VibeControl locally (npm run dev) with a workspace directory.
+Be friendly, helpful, and knowledgeable about software engineering.`;
 
 // ---------------------------------------------------------------------------
 // Tool execution
@@ -292,7 +312,9 @@ export async function POST(request: NextRequest) {
     let chatSession;
     let currentTurn;
     try {
-      const { chat, turn } = await createChatWithFallback(SYSTEM_PROMPT, tools, chatHistory, message);
+      // Only pass tools if workspace exists; in cloud mode the AI answers directly
+      const activeTools = WORKSPACE_EXISTS ? tools : [];
+      const { chat, turn } = await createChatWithFallback(SYSTEM_PROMPT, activeTools, chatHistory, message);
       chatSession = chat;
       currentTurn = turn;
     } catch (err: any) {
