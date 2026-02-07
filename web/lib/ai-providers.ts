@@ -295,10 +295,14 @@ function createOpenAICompatibleChat(
     const text = choice.message.content || "";
     const functionCalls: FunctionCallRequest[] = (
       choice.message.tool_calls || []
-    ).map((tc) => ({
-      name: tc.function.name,
-      args: JSON.parse(tc.function.arguments || "{}"),
-    }));
+    )
+      .filter((tc): tc is OpenAI.ChatCompletionMessageToolCall & { type: "function" } =>
+        tc.type === "function"
+      )
+      .map((tc) => ({
+        name: tc.function.name,
+        args: JSON.parse(tc.function.arguments || "{}"),
+      }));
     return { text, functionCalls };
   }
 
@@ -447,14 +451,14 @@ function createAnthropicChat(
 // ---------------------------------------------------------------------------
 
 /** Providers that use the OpenAI-compatible chat completions API */
-const OPENAI_COMPATIBLE_PROVIDER_TYPES: Set<ProviderType> = new Set([
+const OPENAI_COMPATIBLE_PROVIDER_TYPES = new Set<ProviderType>([
   "openai",
   "grok",
   "deepseek",
   "moonshot",
   "alibaba",
   "mistral",
-]);
+] as const);
 
 export function createChat(
   config: ProviderConfig,
